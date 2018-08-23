@@ -112,7 +112,10 @@
 
     /**
      * Function that determines clipping of entire canvas area
-     * Being passed context as first argument. See clipping canvas area in {@link https://github.com/kangax/fabric.js/wiki/FAQ}
+     * Being passed context as first argument.
+     * If you are using code minification, ctx argument can be minified/manglied you should use
+     * as a workaround `var ctx = arguments[0];` in the function;
+     * See clipping canvas area in {@link https://github.com/kangax/fabric.js/wiki/FAQ}
      * @deprecated since 2.0.0
      * @type Function
      * @default
@@ -201,6 +204,15 @@
      * @default
      */
     skipOffscreen: true,
+
+    /**
+     * a fabricObject that, without stroke define a clipping area with their shape. filled in black
+     * the clipPath object gets used when the canvas has rendered, and the context is placed in the
+     * top left corner of the canvas.
+     * clipPath will clip away controls, if you do not want this to happen use controlsAboveOverlay = true
+     * @type fabric.Object
+     */
+    clipPath: undefined,
 
     /**
      * @private
@@ -838,6 +850,10 @@
     /**
      * Function created to be instance bound at initialization
      * used in requestAnimationFrame rendering
+     * Let the fabricJS call it. If you call it manually you could have more
+     * animationFrame stacking on to of each other
+     * for an imperative rendering, use canvas.renderAll
+     * @private
      * @return {fabric.Canvas} instance
      * @chainable
      */
@@ -848,6 +864,7 @@
 
     /**
      * Append a renderAll request to next animation frame.
+     * unless one is already in progress, in that case nothing is done
      * a boolean flag will avoid appending more.
      * @return {fabric.Canvas} instance
      * @chainable
@@ -877,6 +894,13 @@
       return points;
     },
 
+    cancelRequestedRender: function() {
+      if (this.isRendering) {
+        fabric.util.cancelAnimFrame(this.isRendering);
+        this.isRendering = 0;
+      }
+    },
+
     /**
      * Renders background, objects, overlay and controls.
      * @param {CanvasRenderingContext2D} ctx
@@ -885,14 +909,11 @@
      * @chainable
      */
     renderCanvas: function(ctx, objects) {
-      var v = this.viewportTransform;
-      if (this.isRendering) {
-        fabric.util.cancelAnimFrame(this.isRendering);
-        this.isRendering = 0;
-      }
+      var v = this.viewportTransform, path = this.clipPath;
+      this.cancelRequestedRender();
       this.calcViewportBoundaries();
       this.clearContext(ctx);
-      this.fire('before:render');
+      this.fire('before:render', { ctx: ctx, });
       if (this.clipTo) {
         fabric.util.clipContext(this, ctx);
       }
@@ -909,11 +930,38 @@
       if (this.clipTo) {
         ctx.restore();
       }
+      if (path) {
+        if (path.isCacheDirty()) {
+          // needed to setup a couple of variables
+          path.shouldCache();
+          path.canvas = this;
+          path._transformDone = true;
+          path.renderCache({ forClipping: true });
+        }
+        this.drawClipPathOnCanvas(ctx);
+      }
       this._renderOverlay(ctx);
       if (this.controlsAboveOverlay && this.interactive) {
         this.drawControls(ctx);
       }
-      this.fire('after:render');
+      this.fire('after:render', { ctx: ctx, });
+    },
+
+    /**
+     * Paint the cached clipPath on the lowerCanvasEl
+     * @param {CanvasRenderingContext2D} ctx Context to render on
+     */
+    drawClipPathOnCanvas: function(ctx) {
+      var v = this.viewportTransform, path = this.clipPath;
+      ctx.save();
+      ctx.transform(v[0], v[1], v[2], v[3], v[4], v[5]);
+      // DEBUG: uncomment this line, comment the following
+      // ctx.globalAlpha = 0.4
+      ctx.globalCompositeOperation = 'destination-in';
+      path.transform(ctx);
+      ctx.scale(1 / path.zoomX, 1 / path.zoomY);
+      ctx.drawImage(path._cacheCanvas, -path.cacheTranslationX, -path.cacheTranslationY);
+      ctx.restore();
     },
 
     /**
@@ -1110,11 +1158,13 @@
      */
     _toObjectMethod: function (methodName, propertiesToInclude) {
 
-      var data = {
+      var clipPath = this.clipPath, data = {
         version: fabric.version,
-        objects: this._toObjects(methodName, propertiesToInclude)
+        objects: this._toObjects(methodName, propertiesToInclude),
       };
-
+      if (clipPath) {
+        clipPath = clipPath.toObject(propertiesToInclude);
+      }
       extend(data, this.__serializeBgOverlay(methodName, propertiesToInclude));
 
       fabric.util.populateWithProperties(this, data, propertiesToInclude);
@@ -1126,7 +1176,7 @@
      * @private
      */
     _toObjects: function(methodName, propertiesToInclude) {
-      return this.getObjects().filter(function(object) {
+      return this._objects.filter(function(object) {
         return !object.excludeFromExport;
       }).map(function(instance) {
         return this._toObject(instance, methodName, propertiesToInclude);
@@ -1328,7 +1378,7 @@
     createSVGFontFacesMarkup: function() {
       var markup = '', fontList = { }, obj, fontFamily,
           style, row, rowIndex, _char, charIndex, i, len,
-          fontPaths = fabric.fontPaths, objects = this.getObjects();
+          fontPaths = fabric.fontPaths, objects = this._objects;
 
       for (i = 0, len = objects.length; i < len; i++) {
         obj = objects[i];
@@ -1379,7 +1429,7 @@
      * @private
      */
     _setSVGObjects: function(markup, reviver) {
-      var instance, i, len, objects = this.getObjects();
+      var instance, i, len, objects = this._objects;
       for (i = 0, len = objects.length; i < len; i++) {
         instance = objects[i];
         if (instance.excludeFromExport) {
@@ -1694,7 +1744,7 @@
      */
     toString: function () {
       return '#<fabric.Canvas (' + this.complexity() + '): ' +
-               '{ objects: ' + this.getObjects().length + ' }>';
+               '{ objects: ' + this._objects.length + ' }>';
     }
   });
 
